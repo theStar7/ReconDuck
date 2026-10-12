@@ -25,6 +25,7 @@
 #pragma once
 
 #include <QFrame>
+#include <QSharedPointer>
 #include <functional>
 #include "Code/Interface/QRDInterface.h"
 
@@ -36,6 +37,7 @@ class CaptureDialog;
 class QStandardItemModel;
 class MainWindow;
 class RDLabel;
+struct ManualLaunchState;
 
 class CaptureDialog : public QFrame, public ICaptureDialog
 {
@@ -99,6 +101,7 @@ private slots:
   void on_loadLastCapture_clicked();
 
   void on_launch_clicked();
+  void on_waitLaunch_clicked();
 
   void on_toggleGlobal_clicked();
 
@@ -123,6 +126,7 @@ private:
 
   rdcarray<EnvironmentModification> m_EnvModifications;
   bool m_Inject;
+  QSharedPointer<ManualLaunchState> m_ManualLaunch;
   void fillProcessList();
   void initWarning(RDLabel *label);
 

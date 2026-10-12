@@ -873,6 +873,16 @@
        </spacer>
       </item>
       <item>
+       <widget class="QPushButton" name="waitLaunch">
+        <property name="toolTip">
+         <string>Select the actual rendering executable, then start it through its launcher</string>
+        </property>
+        <property name="text">
+         <string>Wait for Launch</string>
+        </property>
+       </widget>
+      </item>
+      <item>
        <widget class="QPushButton" name="launch">
         <property name="toolTip">
          <string>Launch the selected program with ReconDuck enabled for capture</string>
@@ -883,6 +893,12 @@
        </widget>
       </item>
      </layout>
+    </widget>
+   </item>
+   <item>
+    <widget class="QLabel" name="manualLaunchStatus">
+     <property name="text"><string/></property>
+     <property name="wordWrap"><bool>true</bool></property>
     </widget>
    </item>
    <item>

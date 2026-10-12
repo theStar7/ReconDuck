@@ -21,6 +21,14 @@ public:
   uint32_t pid() const;
   void setPid(uint32_t pid);
 
+  uint32_t parentPid() const;
+  void setParentPid(uint32_t pid);
+  uint64_t startTime() const;
+  void setStartTime(uint64_t time);
+
+  const QString &executablePath() const;
+  void setExecutablePath(const QString &path);
+
   const QString &name() const;
   void setName(const QString &name);
 
@@ -32,6 +40,9 @@ public:
 
 private:
   uint32_t m_pid;
+  uint32_t m_parentPid;
+  uint64_t m_startTime;
+  QString m_executablePath;
   QString m_name;
   QString m_title;
   QString m_cmdLine;

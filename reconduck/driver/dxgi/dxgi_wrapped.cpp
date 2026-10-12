@@ -25,6 +25,7 @@
 
 #include "dxgi_wrapped.h"
 #include "core/core.h"
+#include "driver/d3d11/d3d11_device_diagnostics.h"
 #include "serialise/serialiser.h"
 #include "dxgi_common.h"
 
@@ -546,6 +547,17 @@ HRESULT WrappedIDXGISwapChain4::GetDevice(
   return ret;
 }
 
+static void LogSwapchainFailure(IDXGISwapChain *swapchain, const char *operation, HRESULT result)
+{
+  if(SUCCEEDED(result))
+    return;
+
+  ID3D11Device *device = NULL;
+  swapchain->GetDevice(__uuidof(ID3D11Device), (void **)&device);
+  LogD3D11Failure(device, operation, result);
+  SAFE_RELEASE(device);
+}
+
 HRESULT WrappedIDXGISwapChain4::Present(
     /* [in] */ UINT SyncInterval,
     /* [in] */ UINT Flags)
@@ -561,7 +573,9 @@ HRESULT WrappedIDXGISwapChain4::Present(
     m_pDevice->Present(this, SyncInterval, Flags);
   }
 
-  return m_pReal->Present(SyncInterval, Flags);
+  HRESULT ret = m_pReal->Present(SyncInterval, Flags);
+  LogSwapchainFailure(m_pReal, "Present", ret);
+  return ret;
 }
 
 HRESULT WrappedIDXGISwapChain4::Present1(UINT SyncInterval, UINT Flags,
@@ -578,7 +592,9 @@ HRESULT WrappedIDXGISwapChain4::Present1(UINT SyncInterval, UINT Flags,
     m_pDevice->Present(this, SyncInterval, Flags);
   }
 
-  return m_pReal1->Present1(SyncInterval, Flags, pPresentParameters);
+  HRESULT ret = m_pReal1->Present1(SyncInterval, Flags, pPresentParameters);
+  LogSwapchainFailure(m_pReal1, "Present1", ret);
+  return ret;
 }
 
 HRESULT STDMETHODCALLTYPE WrappedIDXGISwapChain4::GetRestrictToOutput(IDXGIOutput **ppRestrictToOutput)
@@ -633,9 +649,7 @@ HRESULT STDMETHODCALLTYPE WrappedIDXGIOutput6::FindClosestMatchingMode(
       return m_pReal->FindClosestMatchingMode(pModeToMatch, pClosestMatch,
                                               wrapDevice->GetRealIUnknown());
 
-    RDCERR("Unrecognised device in FindClosestMatchingMode()");
-
-    return E_INVALIDARG;
+    return m_pReal->FindClosestMatchingMode(pModeToMatch, pClosestMatch, pConcernedDevice);
   }
 
   return m_pReal->FindClosestMatchingMode(pModeToMatch, pClosestMatch, NULL);
@@ -664,9 +678,7 @@ HRESULT STDMETHODCALLTYPE WrappedIDXGIOutput6::FindClosestMatchingMode1(
       return m_pReal1->FindClosestMatchingMode1(pModeToMatch, pClosestMatch,
                                                 wrapDevice->GetRealIUnknown());
 
-    RDCERR("Unrecognised device in FindClosestMatchingMode1()");
-
-    return E_INVALIDARG;
+    return m_pReal1->FindClosestMatchingMode1(pModeToMatch, pClosestMatch, pConcernedDevice);
   }
 
   return m_pReal1->FindClosestMatchingMode1(pModeToMatch, pClosestMatch, NULL);

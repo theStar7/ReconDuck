@@ -3164,6 +3164,15 @@ void MainWindow::updateToolsMenuOptions()
 
 void MainWindow::closeEvent(QCloseEvent *event)
 {
+  if(m_Ctx.HasCaptureDialog())
+  {
+    CaptureDialog *capture = qobject_cast<CaptureDialog *>(m_Ctx.GetCaptureDialog()->Widget());
+    if(capture && !capture->checkAllowClose())
+    {
+      event->ignore();
+      return;
+    }
+  }
   if(RECONDUCK_IsGlobalHookActive())
   {
     RDDialog::critical(this, tr("Global hook active"),

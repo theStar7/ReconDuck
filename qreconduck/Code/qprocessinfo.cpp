@@ -81,7 +81,23 @@ QProcessList QProcessInfo::enumerate(bool includeWindowTitles)
     {
       QProcessInfo info;
       info.setPid((uint32_t)pe.th32ProcessID);
+      info.setParentPid((uint32_t)pe.th32ParentProcessID);
       info.setName(QString::fromStdWString(std::wstring(pe.szExeFile)));
+
+      HANDLE process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pe.th32ProcessID);
+      if(process)
+      {
+        // Windows executable paths can exceed MAX_PATH.
+        wchar_t processPath[32768] = {};
+        DWORD processPathSize = 32768;
+        if(QueryFullProcessImageNameW(process, 0, processPath, &processPathSize))
+          info.setExecutablePath(QString::fromWCharArray(processPath, (int)processPathSize));
+
+        FILETIME created = {}, exited = {}, kernel = {}, user = {};
+        if(GetProcessTimes(process, &created, &exited, &kernel, &user))
+          info.setStartTime(((uint64_t)created.dwHighDateTime << 32) | created.dwLowDateTime);
+        CloseHandle(process);
+      }
 
       ret.push_back(info);
     } while(Process32Next(h, &pe));
@@ -352,6 +368,38 @@ QProcessList QProcessInfo::enumerate(bool includeWindowTitles)
 QProcessInfo::QProcessInfo()
 {
   m_pid = 0;
+  m_parentPid = 0;
+  m_startTime = 0;
+}
+
+uint32_t QProcessInfo::parentPid() const
+{
+  return m_parentPid;
+}
+
+void QProcessInfo::setParentPid(uint32_t pid)
+{
+  m_parentPid = pid;
+}
+
+uint64_t QProcessInfo::startTime() const
+{
+  return m_startTime;
+}
+
+void QProcessInfo::setStartTime(uint64_t time)
+{
+  m_startTime = time;
+}
+
+const QString &QProcessInfo::executablePath() const
+{
+  return m_executablePath;
+}
+
+void QProcessInfo::setExecutablePath(const QString &path)
+{
+  m_executablePath = path;
 }
 
 uint32_t QProcessInfo::pid() const

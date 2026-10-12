@@ -1175,4 +1175,19 @@
   <ItemGroup>
     <Natvis Include="reconduck.natvis" />
   </ItemGroup>
+  <ItemGroup>
+    <Filter Include="3rdparty\detours" />
+  </ItemGroup>
+  <ItemGroup>
+    <ClCompile Include="3rdparty\detours\detours.cpp"><Filter>3rdparty\detours</Filter></ClCompile>
+    <ClCompile Include="3rdparty\detours\disasm.cpp"><Filter>3rdparty\detours</Filter></ClCompile>
+    <ClCompile Include="3rdparty\detours\modules.cpp"><Filter>3rdparty\detours</Filter></ClCompile>
+    <ClCompile Include="3rdparty\detours\image.cpp"><Filter>3rdparty\detours</Filter></ClCompile>
+  </ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="os\win32\win32_export_detour.h"><Filter>OS\Win32</Filter></ClInclude>
+    <ClInclude Include="os\win32\win32_global_hook.h"><Filter>OS\Win32</Filter></ClInclude>
+    <ClInclude Include="3rdparty\detours\detours.h"><Filter>3rdparty\detours</Filter></ClInclude>
+    <ClInclude Include="3rdparty\detours\detver.h"><Filter>3rdparty\detours</Filter></ClInclude>
+  </ItemGroup>
 </Project>

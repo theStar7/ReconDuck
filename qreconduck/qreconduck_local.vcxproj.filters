@@ -2064,4 +2064,7 @@
     <Natvis Include="python36.natvis" />
     <Natvis Include="python38.natvis" />
   </ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="Code\manual_launch_process.h"><Filter>Code</Filter></ClInclude>
+  </ItemGroup>
 </Project>

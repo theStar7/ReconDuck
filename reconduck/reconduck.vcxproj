@@ -66,7 +66,7 @@
       <MultiProcessorCompilation>true</MultiProcessorCompilation>
       <MinimalRebuild>false</MinimalRebuild>
       <DebugInformationFormat>ProgramDatabase</DebugInformationFormat>
-      <AdditionalIncludeDirectories>$(SolutionDir)reconduck\;$(SolutionDir)reconduck\3rdparty\</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>$(SolutionDir)reconduck\;$(SolutionDir)reconduck\3rdparty\;$(SolutionDir)reconduck\3rdparty\detours\</AdditionalIncludeDirectories>
       <PreprocessorDefinitions>RDOC_BASE_NAME=$(ProjectName);RECONDUCK_EXPORTS;RECONDUCK_PLATFORM_WIN32;WIN32;NDEBUG;_WINDOWS;_USRDLL;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <WarningLevel>Level4</WarningLevel>
       <TreatWarningAsError>true</TreatWarningAsError>
@@ -917,4 +917,32 @@ namespace DXCEnumerateAndCheck {
     <Copy SourceFiles="$(ProjectDir)3rdparty\dbghelp\$(Platform)\dbghelp.dll" DestinationFolder="$(OutDir)">
     </Copy>
   </Target>
+  <ItemGroup>
+    <ClCompile Include="3rdparty\detours\detours.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <ForcedIncludeFiles />
+      <TreatWarningAsError>false</TreatWarningAsError>
+    </ClCompile>
+    <ClCompile Include="3rdparty\detours\disasm.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <ForcedIncludeFiles />
+      <TreatWarningAsError>false</TreatWarningAsError>
+    </ClCompile>
+    <ClCompile Include="3rdparty\detours\modules.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <ForcedIncludeFiles />
+      <TreatWarningAsError>false</TreatWarningAsError>
+    </ClCompile>
+    <ClCompile Include="3rdparty\detours\image.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <ForcedIncludeFiles />
+      <TreatWarningAsError>false</TreatWarningAsError>
+    </ClCompile>
+  </ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="os\win32\win32_export_detour.h" />
+    <ClInclude Include="os\win32\win32_global_hook.h" />
+    <ClInclude Include="3rdparty\detours\detours.h" />
+    <ClInclude Include="3rdparty\detours\detver.h" />
+  </ItemGroup>
 </Project>

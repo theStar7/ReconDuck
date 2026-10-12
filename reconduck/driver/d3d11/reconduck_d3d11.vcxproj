@@ -179,4 +179,7 @@
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">
   </ImportGroup>
+  <ItemGroup>
+    <ClInclude Include="d3d11_device_diagnostics.h" />
+  </ItemGroup>
 </Project>

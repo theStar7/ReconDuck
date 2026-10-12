@@ -2188,4 +2188,7 @@
     </PropertyPageSchema>
   </ItemGroup>
   <Import Project="custom_qt.props" />
+  <ItemGroup>
+    <ClInclude Include="Code\manual_launch_process.h" />
+  </ItemGroup>
 </Project>

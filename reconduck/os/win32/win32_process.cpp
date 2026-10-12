@@ -33,6 +33,7 @@
 #include "core/core.h"
 #include "os/os_specific.h"
 #include "os/win32/win32_threadcontext.h"
+#include "os/win32/win32_global_hook.h"
 #include "strings/string_utils.h"
 
 #include <string>
@@ -1282,307 +1283,52 @@ bool Process::CanGlobalHook()
   return true;
 }
 
-// to simplify the below code, rather than splitting by 32-bit/64-bit we split by native and Wow32.
-// This means that for 32-bit code (whether it's on 32-bit OS or not) we just have native, and the
-// Wow32 stuff is empty/unused. For 64-bit we use both. Thus the native registry key is always the
-// same path regardless of the bitness we're running as and we don't have to move things around or
-// have conditionals all over
+// Failed starts and stops retain their recovery state until cleanup succeeds.
+static GlobalHook::Session *globalHook = NULL;
+static GlobalHook::Session *pendingGlobalHook = NULL;
+static SRWLOCK globalHookLock = SRWLOCK_INIT;
+static volatile LONG globalHookActivity = 0;
 
-struct GlobalHookData
+// Start/Stop own the session pointers under this lock. The UI reads only the atomic status,
+// including startup and recovery, without blocking on helper readiness or cleanup waits.
+struct GlobalHookOperation
 {
-  struct
+  GlobalHookOperation()
   {
-    HANDLE pipe = NULL;
-    DWORD appinitEnabled = 0;
-    rdcwstr appinitDLLs;
-  } dataNative, dataWow32;
-
-  int32_t finished = 0;
-  Threading::ThreadHandle pipeThread = 0;
+    AcquireSRWLockExclusive(&globalHookLock);
+    InterlockedExchange(&globalHookActivity, 1);
+  }
+  ~GlobalHookOperation()
+  {
+    InterlockedExchange(&globalHookActivity, globalHook || pendingGlobalHook ? 1 : 0);
+    ReleaseSRWLockExclusive(&globalHookLock);
+  }
+  GlobalHookOperation(const GlobalHookOperation &) = delete;
+  GlobalHookOperation &operator=(const GlobalHookOperation &) = delete;
 };
-
-// utility function to close the registry keys, print an error, and quit
-static RDResult HandleRegError(HKEY keyNative, HKEY keyWow32, LSTATUS ret, const char *msg)
-{
-  if(keyNative)
-    RegCloseKey(keyNative);
-
-  if(keyWow32)
-    RegCloseKey(keyWow32);
-
-  RDCLOG("Error with AppInit registry keys - %s (%d)", msg, ret);
-
-  RETURN_ERROR_RESULT(ResultCode::InjectionFailed,
-                      "Error updating registry to enable global hook.\n"
-                      "Check that ReconDuck is correctly running as administrator.");
-}
-
-#define REG_CHECK(msg)                                    \
-  if(ret != ERROR_SUCCESS)                                \
-  {                                                       \
-    return HandleRegError(keyNative, keyWow32, ret, msg); \
-  }
-
-// function to backup the previous settings for AppInit, then enable it and write our own paths.
-RDResult BackupAndChangeRegistry(GlobalHookData &hookdata, const rdcstr &shimpathWow32,
-                                 const rdcstr &shimpathNative)
-{
-  HKEY keyNative = NULL;
-  HKEY keyWow32 = NULL;
-
-  // AppInit_DLLs requires short paths, but short paths can be disabled globally or on a per-volume
-  // level. If short paths are disabled we'll get the long path back, we *always* expect the path to
-  // get shorter because the shim filename is bigger than 8.3.
-
-  DWORD nativeShortSize = GetShortPathNameW(StringFormat::UTF82Wide(shimpathNative).c_str(), NULL,
-                                            (DWORD)shimpathNative.length());
-  if(nativeShortSize == (DWORD)shimpathNative.length() + 1)
-  {
-    RETURN_ERROR_RESULT(
-        ResultCode::FileIOFailed,
-        "ReconDuck is installed on a volume or system that has short paths disabled.\n"
-        "For the global hook, short paths must be enabled where ReconDuck is installed.");
-  }
-
-  if(!shimpathWow32.empty())
-  {
-    DWORD wow32ShortSize = GetShortPathNameW(StringFormat::UTF82Wide(shimpathWow32).c_str(), NULL,
-                                             (DWORD)shimpathWow32.length());
-
-    if(wow32ShortSize == (DWORD)shimpathWow32.length() + 1)
-    {
-      RETURN_ERROR_RESULT(
-          ResultCode::FileIOFailed,
-          "ReconDuck is installed on a volume or system that has short paths disabled.\n"
-          "For the global hook, short paths must be enabled where ReconDuck is installed.");
-    }
-  }
-
-  // open the native key
-  LSTATUS ret = RegCreateKeyExA(HKEY_LOCAL_MACHINE,
-                                "SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\Windows", 0, NULL,
-                                0, KEY_READ | KEY_WRITE, NULL, &keyNative, NULL);
-
-  REG_CHECK("Could not open AppInit key");
-
-  // if we are doing Wow32, open that key as well
-  if(!shimpathWow32.empty())
-  {
-    ret = RegCreateKeyExA(HKEY_LOCAL_MACHINE,
-                          "SOFTWARE\\Wow6432Node\\Microsoft\\Windows NT\\CurrentVersion\\Windows",
-                          0, NULL, 0, KEY_READ | KEY_WRITE, NULL, &keyWow32, NULL);
-
-    REG_CHECK("Could not open AppInit key");
-  }
-
-  const DWORD one = 1;
-
-  // fetch the previous data for LoadAppInit_DLLs and AppInit_DLLs
-  DWORD sz = 4;
-  ret = RegGetValueA(keyNative, NULL, "LoadAppInit_DLLs", RRF_RT_REG_DWORD, NULL,
-                     (void *)&hookdata.dataNative.appinitEnabled, &sz);
-  REG_CHECK("Could not fetch LoadAppInit_DLLs");
-
-  sz = 0;
-  ret = RegGetValueW(keyNative, NULL, L"AppInit_DLLs", RRF_RT_ANY, NULL, NULL, &sz);
-  if(ret == ERROR_MORE_DATA || ret == ERROR_SUCCESS)
-  {
-    hookdata.dataNative.appinitDLLs = rdcwstr(sz / sizeof(wchar_t));
-    ret = RegGetValueW(keyNative, NULL, L"AppInit_DLLs", RRF_RT_ANY, NULL,
-                       hookdata.dataNative.appinitDLLs.data(), &sz);
-  }
-  REG_CHECK("Could not fetch AppInit_DLLs");
-
-  // set DWORD:1 for LoadAppInit_DLLs and convert our path to a short path then set it
-  ret = RegSetValueExA(keyNative, "LoadAppInit_DLLs", 0, REG_DWORD, (const BYTE *)&one, sizeof(one));
-  REG_CHECK("Could not set LoadAppInit_DLLs");
-
-  rdcwstr shortpath(shimpathNative.size());
-  GetShortPathNameW(StringFormat::UTF82Wide(shimpathNative).c_str(), shortpath.data(),
-                    (DWORD)shortpath.length());
-
-  ret = RegSetValueExW(keyNative, L"AppInit_DLLs", 0, REG_SZ, (const BYTE *)shortpath.data(),
-                       DWORD(shortpath.length() * sizeof(wchar_t)));
-  REG_CHECK("Could not set AppInit_DLLs");
-
-  // if we're doing Wow32, repeat the process for those keys
-  if(keyWow32)
-  {
-    sz = 4;
-    ret = RegGetValueA(keyWow32, NULL, "LoadAppInit_DLLs", RRF_RT_REG_DWORD, NULL,
-                       (void *)&hookdata.dataWow32.appinitEnabled, &sz);
-    REG_CHECK("Could not fetch LoadAppInit_DLLs");
-
-    sz = 0;
-    ret = RegGetValueW(keyWow32, NULL, L"AppInit_DLLs", RRF_RT_ANY, NULL, NULL, &sz);
-    if(ret == ERROR_MORE_DATA || ret == ERROR_SUCCESS)
-    {
-      hookdata.dataWow32.appinitDLLs = rdcwstr(sz / sizeof(wchar_t));
-      ret = RegGetValueW(keyWow32, NULL, L"AppInit_DLLs", RRF_RT_ANY, NULL,
-                         hookdata.dataWow32.appinitDLLs.data(), &sz);
-    }
-    REG_CHECK("Could not fetch AppInit_DLLs");
-
-    ret = RegSetValueExA(keyWow32, "LoadAppInit_DLLs", 0, REG_DWORD, (const BYTE *)&one, sizeof(one));
-    REG_CHECK("Could not set LoadAppInit_DLLs");
-
-    shortpath = rdcwstr(shimpathWow32.size());
-    GetShortPathNameW(StringFormat::UTF82Wide(shimpathWow32).c_str(), shortpath.data(),
-                      (DWORD)shortpath.length());
-
-    ret = RegSetValueExW(keyWow32, L"AppInit_DLLs", 0, REG_SZ, (const BYTE *)shortpath.data(),
-                         DWORD(shortpath.length() * sizeof(wchar_t)));
-    REG_CHECK("Could not set AppInit_DLLs");
-  }
-
-  std::wstring backup;
-
-  // write a .reg file that contains the previous settings, so that if all else fails the user can
-  // manually insert it back into the registry to restore everything.
-  backup += L"Windows Registry Editor Version 5.00\n";
-  backup += L"\n";
-  backup += L"[HKEY_LOCAL_MACHINE\\SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\Windows]\n";
-  backup += L"\"LoadAppInit_DLLs\"=dword:0000000";
-  backup += (hookdata.dataNative.appinitEnabled ? L"1\n" : L"0\n");
-  backup += L"\"AppInit_DLLs\"=\"";
-  // we append with the C string so we don't add trailing NULLs into the text.
-  backup += hookdata.dataNative.appinitDLLs.c_str();
-  backup += L"\"\n";
-  if(keyWow32)
-  {
-    backup += L"\n";
-    backup +=
-        L"[HKEY_LOCAL_MACHINE\\SOFTWARE\\Wow6432Node\\Microsoft\\"
-        L"Windows NT\\CurrentVersion\\Windows]\n";
-    backup += L"\"LoadAppInit_DLLs\"=dword:0000000";
-    backup += (hookdata.dataWow32.appinitEnabled ? L"1\n" : L"0\n");
-    backup += L"\"AppInit_DLLs\"=\"";
-    backup += hookdata.dataWow32.appinitDLLs.c_str();
-    backup += L"\"\n";
-  }
-
-  if(keyNative)
-    RegCloseKey(keyNative);
-
-  if(keyWow32)
-    RegCloseKey(keyWow32);
-
-  keyNative = keyWow32 = NULL;
-
-  // write it to disk but don't fail if we can't, just print it to the log and keep going.
-  wchar_t reg_backup[MAX_PATH];
-  GetTempPathW(MAX_PATH, reg_backup);
-  wcscat_s(reg_backup, L"ReconDuck_RestoreGlobalHook.reg");
-
-  FILE *f = NULL;
-  _wfopen_s(&f, reg_backup, L"w");
-  if(f)
-  {
-    fputws(backup.c_str(), f);
-    fclose(f);
-  }
-  else
-  {
-    RDCERR("Error opening registry backup file %ls", reg_backup);
-    RDCERR("Backup registry data is:\n\n%ls\n\n", backup.c_str());
-  }
-
-  return RDResult();
-}
-
-// switch error-handling to print-and-continue, as we can't really do anything about it at this
-// point and we want to continue restoring in case only one thing failed.
-#undef REG_CHECK
-#define REG_CHECK(msg)                                                      \
-  if(ret != ERROR_SUCCESS)                                                  \
-  {                                                                         \
-    HandleRegError(keyNative, keyWow32, ret, "Could not open AppInit key"); \
-  }
-
-void RestoreRegistry(const GlobalHookData &hookdata)
-{
-  HKEY keyNative = NULL;
-  HKEY keyWow32 = NULL;
-  LSTATUS ret = RegCreateKeyExA(HKEY_LOCAL_MACHINE,
-                                "SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\Windows", 0, NULL,
-                                0, KEY_READ | KEY_WRITE, NULL, &keyNative, NULL);
-
-  REG_CHECK("Could not open AppInit key");
-
-#if ENABLED(RDOC_X64)
-  ret = RegCreateKeyExA(HKEY_LOCAL_MACHINE,
-                        "SOFTWARE\\Wow6432Node\\Microsoft\\Windows NT\\CurrentVersion\\Windows", 0,
-                        NULL, 0, KEY_READ | KEY_WRITE, NULL, &keyWow32, NULL);
-
-  REG_CHECK("Could not open AppInit key");
-#endif
-
-  // set the native values back to where they were
-  ret = RegSetValueExA(keyNative, "LoadAppInit_DLLs", 0, REG_DWORD,
-                       (const BYTE *)&hookdata.dataNative.appinitEnabled,
-                       sizeof(hookdata.dataNative.appinitEnabled));
-  REG_CHECK("Could not set LoadAppInit_DLLs");
-
-  ret = RegSetValueExW(keyNative, L"AppInit_DLLs", 0, REG_SZ,
-                       (const BYTE *)hookdata.dataNative.appinitDLLs.c_str(),
-                       DWORD(hookdata.dataNative.appinitDLLs.length() * sizeof(wchar_t)));
-  REG_CHECK("Could not set AppInit_DLLs");
-
-  // if we opened it, restore the Wow32 values as well
-  if(keyWow32)
-  {
-    ret = RegSetValueExA(keyWow32, "LoadAppInit_DLLs", 0, REG_DWORD,
-                         (const BYTE *)&hookdata.dataWow32.appinitEnabled,
-                         sizeof(hookdata.dataWow32.appinitEnabled));
-    REG_CHECK("Could not set LoadAppInit_DLLs");
-
-    ret = RegSetValueExW(keyWow32, L"AppInit_DLLs", 0, REG_SZ,
-                         (const BYTE *)hookdata.dataWow32.appinitDLLs.c_str(),
-                         DWORD(hookdata.dataWow32.appinitDLLs.length() * sizeof(wchar_t)));
-    REG_CHECK("Could not set AppInit_DLLs");
-  }
-}
-
-static GlobalHookData *globalHook = NULL;
-
-// a thread we run in the background just to keep the pipes open and wait until we're ready to stop
-// the global hook.
-static void GlobalHookThread()
-{
-  Threading::SetCurrentThreadName("GlobalHookThread");
-
-  // keep looping doing an atomic compare-exchange to check that finished is still 0
-  while(Atomic::CmpExch32(&globalHook->finished, 0, 0) == 0)
-  {
-    // wake every quarter of a second to test again
-    Threading::Sleep(250);
-  }
-
-  char exitData[32] = "exit";
-
-  // write some data into the pipe and close it. The data is (currently) unimportant, just that it
-  // causes the blocking read on the other end to succeed and close the program.
-  DWORD dummy = 0;
-  if(globalHook->dataNative.pipe)
-  {
-    WriteFile(globalHook->dataNative.pipe, exitData, (DWORD)sizeof(exitData), &dummy, NULL);
-    CloseHandle(globalHook->dataNative.pipe);
-  }
-
-  if(globalHook->dataWow32.pipe)
-  {
-    WriteFile(globalHook->dataWow32.pipe, exitData, (DWORD)sizeof(exitData), &dummy, NULL);
-    CloseHandle(globalHook->dataWow32.pipe);
-  }
-}
 
 RDResult Process::StartGlobalHook(const rdcstr &pathmatch, const rdcstr &capturefile,
                                   const CaptureOptions &opts)
 {
-  if(pathmatch.empty())
+  if(pathmatch.length() < 4 || pathmatch.contains("\"") || capturefile.contains("\""))
   {
     RETURN_ERROR_RESULT(ResultCode::InvalidParameter,
-                        "Invalid global hook parameter, empty path to match");
+                        "Global hook needs a path match of at least four characters and no quotes");
+  }
+  GlobalHookOperation operation;
+  if(globalHook)
+  {
+    RETURN_ERROR_RESULT(ResultCode::InjectionFailed, "Global hook is already active");
+  }
+  if(pendingGlobalHook)
+  {
+    if(!pendingGlobalHook->Cleanup())
+    {
+      RETURN_ERROR_RESULT(ResultCode::InjectionFailed, "Global hook recovery is still pending: %s",
+                          StringFormat::Wide2UTF8(pendingGlobalHook->error.c_str()).c_str());
+    }
+    delete pendingGlobalHook;
+    pendingGlobalHook = NULL;
   }
 
   rdcstr reconduckPath;
@@ -1639,189 +1385,75 @@ RDResult Process::StartGlobalHook(const rdcstr &pathmatch, const rdcstr &capture
 
 #endif
 
-  GlobalHookData hookdata;
-
-  // try to backup and change the registry settings to start loading our shim dlls. If that fails,
-  // we bail out immediately
-  RDResult regStatus = BackupAndChangeRegistry(hookdata, shimpathWow32, shimpathNative);
-  if(regStatus != ResultCode::Succeeded)
-    return regStatus;
-
-  PROCESS_INFORMATION pi = {0};
-  STARTUPINFO si = {0};
-  SECURITY_ATTRIBUTES pSec = {0};
-  SECURITY_ATTRIBUTES tSec = {0};
-  pSec.nLength = sizeof(pSec);
-  tSec.nLength = sizeof(tSec);
-
-  si.cb = sizeof(si);
-
-  // serialise to string with two chars per byte
-  rdcstr optstr = opts.EncodeAsString();
-  rdcstr debugLogfile = RDCGETLOGFILE();
-
-  rdcstr params = StringFormat::Fmt(
-      "\"%s\" globalhook --match \"%s\" --capfile \"%s\" --debuglog \"%s\" --capopts \"%s\"",
-      cmdpathNative.c_str(), pathmatch.c_str(), capturefile.c_str(), debugLogfile.c_str(),
-      optstr.c_str());
-
-  rdcwstr paramsAlloc = StringFormat::UTF82Wide(params);
-
-  // we'll be setting stdin
-  si.dwFlags = STARTF_USESHOWWINDOW | STARTF_USESTDHANDLES;
-
-  // hide the console window
-  si.wShowWindow = SW_HIDE;
-
-  // this is the end of the pipe that the child will inherit and use as stdin
-  HANDLE childEnd = NULL;
-
-  DWORD err;
-
-  // create a pipe with the writing end for us, and the reading end as the child process's stdin
-  {
-    SECURITY_ATTRIBUTES pipeSec;
-    pipeSec.nLength = sizeof(SECURITY_ATTRIBUTES);
-    pipeSec.bInheritHandle = TRUE;
-    pipeSec.lpSecurityDescriptor = NULL;
-
-    BOOL res;
-    res = CreatePipe(&childEnd, &hookdata.dataNative.pipe, &pipeSec, 0);
-
-    if(!res)
-    {
-      err = GetLastError();
-      RestoreRegistry(hookdata);
-      RETURN_ERROR_RESULT(ResultCode::InternalError, "Could not create 32-bit stdin pipe (err %u)",
-                          err);
-    }
-
-    // we don't want the child process to inherit our end
-    res = SetHandleInformation(hookdata.dataNative.pipe, HANDLE_FLAG_INHERIT, 0);
-
-    if(!res)
-    {
-      err = GetLastError();
-      RestoreRegistry(hookdata);
-      RETURN_ERROR_RESULT(ResultCode::InternalError,
-                          "Could not make 32-bit stdin pipe inheritable (err %u)", err);
-    }
-
-    si.hStdInput = childEnd;
-  }
-
-  // launch the process
-  BOOL retValue = CreateProcessW(NULL, &paramsAlloc[0], &pSec, &tSec, true, CREATE_NEW_CONSOLE,
-                                 NULL, NULL, &si, &pi);
-
-  err = GetLastError();
-
-  // we don't need this end anymore, the child has it
-  CloseHandle(childEnd);
-
-  if(retValue == FALSE)
-  {
-    CloseHandle(hookdata.dataNative.pipe);
-    RestoreRegistry(hookdata);
-    RETURN_ERROR_RESULT(ResultCode::InternalError, "Can't launch reconduckcmd from '%s' (err %u)",
-                        cmdpathNative.c_str(), err);
-  }
-
-  CloseHandle(pi.hThread);
-  CloseHandle(pi.hProcess);
-
-  RDCEraseEl(pi);
-
-// repeat the process for the Wow32 reconduckcmd
+  std::vector<GlobalHook::Component> components;
+  GlobalHook::Component native;
+  native.shim = StringFormat::UTF82Wide(shimpathNative).c_str();
+  native.command = StringFormat::UTF82Wide(cmdpathNative).c_str();
+  native.library = StringFormat::UTF82Wide(get_dirname(cmdpathNative) + "\\reconduck.dll").c_str();
 #if ENABLED(RDOC_X64)
-  params = StringFormat::Fmt(
-      "\"%s\" globalhook --match \"%s\" --capfile \"%s\" --debuglog \"%s\" --capopts \"%s\"",
-      cmdpathWow32.c_str(), pathmatch.c_str(), capturefile.c_str(), debugLogfile.c_str(),
-      optstr.c_str());
-
-  paramsAlloc = StringFormat::UTF82Wide(params);
-
-  {
-    SECURITY_ATTRIBUTES pipeSec;
-    pipeSec.nLength = sizeof(SECURITY_ATTRIBUTES);
-    pipeSec.bInheritHandle = TRUE;
-    pipeSec.lpSecurityDescriptor = NULL;
-
-    BOOL res;
-    res = CreatePipe(&childEnd, &hookdata.dataWow32.pipe, &pipeSec, 0);
-
-    if(!res)
-    {
-      err = GetLastError();
-      RestoreRegistry(hookdata);
-      RETURN_ERROR_RESULT(ResultCode::InternalError, "Could not create 64-bit stdin pipe (err %u)",
-                          err);
-    }
-
-    res = SetHandleInformation(hookdata.dataWow32.pipe, HANDLE_FLAG_INHERIT, 0);
-
-    if(!res)
-    {
-      err = GetLastError();
-      RestoreRegistry(hookdata);
-      RETURN_ERROR_RESULT(ResultCode::InternalError,
-                          "Could not make 64-bit stdin pipe inheritable (err %u)", err);
-    }
-
-    si.hStdInput = childEnd;
-  }
-
-  retValue = CreateProcessW(NULL, &paramsAlloc[0], &pSec, &tSec, true, CREATE_NEW_CONSOLE, NULL,
-                            NULL, &si, &pi);
-
-  err = GetLastError();
-
-  // we don't need this end anymore
-  CloseHandle(childEnd);
-
-  if(retValue == FALSE)
-  {
-    CloseHandle(hookdata.dataNative.pipe);
-    CloseHandle(hookdata.dataWow32.pipe);
-    RestoreRegistry(hookdata);
-    RETURN_ERROR_RESULT(ResultCode::InternalError, "Can't launch reconduckcmd from '%s' (err %u)",
-                        cmdpathWow32.c_str(), err);
-  }
-
-  CloseHandle(pi.hThread);
-  CloseHandle(pi.hProcess);
+  native.view = KEY_WOW64_64KEY;
+  native.architecture = L"64-bit";
+#else
+  native.view = KEY_WOW64_32KEY;
+  native.architecture = L"32-bit";
+#endif
+  components.push_back(native);
+#if ENABLED(RDOC_X64)
+  GlobalHook::Component wow32;
+  wow32.shim = StringFormat::UTF82Wide(shimpathWow32).c_str();
+  wow32.command = StringFormat::UTF82Wide(cmdpathWow32).c_str();
+  wow32.library = StringFormat::UTF82Wide(get_dirname(cmdpathWow32) + "\\reconduck.dll").c_str();
+  wow32.view = KEY_WOW64_32KEY;
+  wow32.architecture = L"32-bit";
+  components.push_back(wow32);
 #endif
 
-  // set static global pointer with our data, and launch the thread
-  globalHook = new GlobalHookData;
-  *globalHook = hookdata;
-
-  globalHook->pipeThread = Threading::CreateThread(&GlobalHookThread);
-
+  rdcstr debugLogfile = RDCGETLOGFILE();
+  rdcstr arguments = StringFormat::Fmt(
+      "globalhook --match \"%s\" --capfile \"%s\" --debuglog \"%s\" --capopts \"%s\"",
+      pathmatch.c_str(), capturefile.c_str(), debugLogfile.c_str(), opts.EncodeAsString().c_str());
+  GlobalHook::Session *candidate = new GlobalHook::Session;
+  if(!candidate->Start(components, StringFormat::UTF82Wide(arguments).c_str()))
+  {
+    rdcstr diagnostic = StringFormat::Wide2UTF8(candidate->error.c_str());
+    if(candidate->Cleanup())
+      delete candidate;
+    else
+    {
+      diagnostic = StringFormat::Wide2UTF8(candidate->error.c_str());
+      pendingGlobalHook = candidate;
+    }
+    RETURN_ERROR_RESULT(ResultCode::InjectionFailed, "%s", diagnostic.c_str());
+  }
+  // Start has snapshotted both views, written recovery data, and confirmed helper readiness.
+  globalHook = candidate;
   return RDResult();
 }
 
 bool Process::IsGlobalHookActive()
 {
-  return globalHook != NULL;
+  // Startup, cleanup and pending recovery may still own AppInit writes or a helper.
+  return InterlockedCompareExchange(&globalHookActivity, 0, 0) != 0;
 }
 void Process::StopGlobalHook()
 {
-  if(!globalHook)
-    return;
-
-  // set the finished flag and join to the thread so it closes the pipes (and so the child
-  // processes)
-  Atomic::Inc32(&globalHook->finished);
-
-  Threading::JoinThread(globalHook->pipeThread);
-  Threading::CloseThread(globalHook->pipeThread);
-
-  // restore the registry settings from before we started
-  RestoreRegistry(*globalHook);
-
-  delete globalHook;
-  globalHook = NULL;
+  GlobalHookOperation operation;
+  GlobalHook::Session *sessions[] = {globalHook, pendingGlobalHook};
+  globalHook = pendingGlobalHook = NULL;
+  for(GlobalHook::Session *session : sessions)
+  {
+    if(!session)
+      continue;
+    if(session->Cleanup())
+      delete session;
+    else
+    {
+      // Keep the snapshots, registry keys and lease so Stop/Start can retry recovery.
+      pendingGlobalHook = session;
+      RDCERR("Global hook cleanup incomplete: %s",
+             StringFormat::Wide2UTF8(session->error.c_str()).c_str());
+    }
+  }
 }
 
 bool Process::IsModuleLoaded(const rdcstr &module)

@@ -23,14 +23,23 @@
  ******************************************************************************/
 
 #include "CaptureDialog.h"
+#include <QAtomicInt>
+#include <QElapsedTimer>
+#include <QHash>
 #include <QKeyEvent>
 #include <QMouseEvent>
+#include <QMutex>
+#include <QMutexLocker>
+#include <QSet>
 #include <QSortFilterProxyModel>
 #include <QStandardItemModel>
 #include <QStandardPaths>
+#include <QTimer>
+#include "Code/manual_launch_process.h"
 #include "Code/QRDUtils.h"
 #include "Code/qprocessinfo.h"
 #include "Windows/Dialogs/EnvironmentEditor.h"
+#include "Windows/Dialogs/LiveCapture.h"
 #include "Windows/Dialogs/VirtualFileDialog.h"
 #include "Windows/MainWindow.h"
 #include "flowlayout/FlowLayout.h"
@@ -39,6 +48,258 @@
 
 #define JSON_ID "rdocCaptureSettings"
 #define JSON_VER 1
+
+// Worker state owns no widgets and is retained by both the worker and the UI poller.
+// Cancellation never waits for a target's socket or injection call on the UI thread.
+struct ManualLaunchState
+{
+  QAtomicInt cancelled = 0;
+  QAtomicInt done = 0;
+  QMutex mutex;
+  QString status;
+  QString error;
+  uint32_t ident = 0;
+  bool cleanupFailed = false;
+
+  void SetStatus(const QString &text)
+  {
+    QMutexLocker lock(&mutex);
+    status = text;
+  }
+};
+
+#if defined(Q_OS_WIN32)
+static QString NormaliseManualLaunchPath(const QString &path)
+{
+  if(path.isEmpty())
+    return QString();
+  QFileInfo info(path);
+  QString resolved = info.canonicalFilePath();
+  if(resolved.isEmpty())
+    resolved = info.absoluteFilePath();
+  return QDir::cleanPath(QDir::fromNativeSeparators(resolved)).toCaseFolded();
+}
+
+struct ManualLaunchProcesses
+{
+  QList<QString> paths;
+  QVector<ManualLaunch::Process> processes;
+
+  ManualLaunchProcesses()
+  {
+    QProcessList list = QProcessInfo::enumerate(false);
+    paths.reserve(list.count());
+    processes.reserve(list.count());
+    for(const QProcessInfo &info : list)
+      paths.push_back(NormaliseManualLaunchPath(info.executablePath()));
+    for(int i = 0; i < list.count(); i++)
+      processes.push_back({list[i].pid(), list[i].parentPid(), list[i].startTime(),
+                           reinterpret_cast<const wchar_t *>(paths[i].utf16())});
+  }
+};
+
+static QSet<uint32_t> ManualLaunchTargets(const QSharedPointer<ManualLaunchState> &state)
+{
+  QSet<uint32_t> targets;
+  uint32_t ident = 0;
+  while(!state->cancelled.loadAcquire())
+  {
+    uint32_t next = RECONDUCK_EnumerateRemoteTargets("localhost", ident);
+    if(next == 0 || next <= ident)
+      break;
+    targets.insert(next);
+    ident = next;
+  }
+  return targets;
+}
+
+static void RunManualLaunch(const QSharedPointer<ManualLaunchState> &state, const QString &exe,
+                            const QString &capturefile, const CaptureSettings &settings,
+                            const rdcstr &username)
+{
+  const wchar_t *target = reinterpret_cast<const wchar_t *>(exe.utf16());
+  ManualLaunchProcesses existing;
+  QSet<uint32_t> existingTargets = ManualLaunchTargets(state);
+  bool ownsGlobalHook = false;
+  if(!state->cancelled.loadAcquire())
+  {
+    if(RECONDUCK_IsGlobalHookActive())
+      state->error = CaptureDialog::tr("A Global Hook session is already active. Disable it before waiting.");
+    else
+    {
+      ResultDetails result = RECONDUCK_StartGlobalHook(exe, capturefile, settings.options);
+      ownsGlobalHook = result.OK();
+      if(!ownsGlobalHook)
+      {
+        state->error = QString(result.Message());
+        // Failed startup can retain an owned recovery session if rollback failed.
+        // The pre-existing-session check above ensures this belongs to our start.
+        ownsGlobalHook = RECONDUCK_IsGlobalHookActive();
+      }
+    }
+  }
+
+  QHash<uint32_t, unsigned> attempts;
+  QHash<uint32_t, uint64_t> lifetimes;
+  QHash<uint32_t, qint64> lastAttempt;
+  QHash<uint32_t, QString> lastError;
+  QSet<uint32_t> injected;
+  QElapsedTimer clock;
+  clock.start();
+  qint64 detectedAt = -1;
+  state->SetStatus(CaptureDialog::tr("Waiting for %1. Start the application through its launcher.")
+                       .arg(QFileInfo(exe).fileName()));
+
+  while(ownsGlobalHook && !state->cancelled.loadAcquire() && state->error.isEmpty() && state->ident == 0)
+  {
+    ManualLaunchProcesses current;
+    bool targetAlive = false;
+    for(const ManualLaunch::Process &process : current.processes)
+    {
+      if(ManualLaunch::IsNew(process, existing.processes.constData(), existing.processes.count()) &&
+         ManualLaunch::IsExactTarget(process, target))
+      {
+        targetAlive = true;
+        if(detectedAt < 0)
+          detectedAt = clock.elapsed();
+        if(lifetimes.value(process.pid) != process.started)
+        {
+          lifetimes[process.pid] = process.started;
+          attempts.remove(process.pid);
+          injected.remove(process.pid);
+          lastAttempt.remove(process.pid);
+          lastError.remove(process.pid);
+        }
+        state->SetStatus(CaptureDialog::tr("Detected target PID %1. Waiting for capture connection...")
+                             .arg(process.pid));
+      }
+    }
+
+    // Inspect Global Hook connections before fallback injection to avoid reinjecting a live target.
+    QSet<uint32_t> targets = ManualLaunchTargets(state);
+    for(uint32_t ident : targets)
+    {
+      if(state->cancelled.loadAcquire())
+        break;
+      ITargetControl *control = RECONDUCK_CreateTargetControl("localhost", ident, username, false);
+      if(!control)
+        continue;
+      uint32_t pid = control->GetPID();
+      bool exact = false, child = false;
+      for(const ManualLaunch::Process &process : current.processes)
+      {
+        if(process.pid != pid ||
+           !ManualLaunch::IsNew(process, existing.processes.constData(), existing.processes.count()))
+          continue;
+        exact = ManualLaunch::IsExactTarget(process, target);
+        child = ManualLaunch::HasTargetAncestor(process, current.processes.constData(),
+                                                current.processes.count(), existing.processes.constData(),
+                                                existing.processes.count(), target);
+      }
+      // A control port can be reused after its previous process exits. Only accept
+      // such a port when the current PID/lifetime independently proves relation.
+      if(existingTargets.contains(ident) && !exact && !child)
+      {
+        control->Shutdown();
+        continue;
+      }
+      bool presenting = false, supported = false;
+      if(child && !exact)
+      {
+        QElapsedTimer probe;
+        probe.start();
+        while(!state->cancelled.loadAcquire() && control->Connected() && probe.elapsed() < 100)
+        {
+          TargetControlMessage message = control->ReceiveMessage();
+          if(message.type == TargetControlMessageType::RegisterAPI && message.apiUse.supported &&
+             message.apiUse.presenting)
+          {
+            supported = presenting = true;
+            break;
+          }
+        }
+      }
+      bool connect = ManualLaunch::CanConnect(exact, child, supported, presenting);
+      control->Shutdown();
+      if(connect && !state->cancelled.loadAcquire())
+      {
+        state->ident = ident;
+        break;
+      }
+    }
+
+    if(state->ident || state->cancelled.loadAcquire())
+      break;
+    if(detectedAt >= 0 && !targetAlive)
+    {
+      state->error = CaptureDialog::tr("The selected process exited before a capture connection was available.");
+      break;
+    }
+    if(detectedAt >= 0 && clock.elapsed() - detectedAt >= 30000)
+    {
+      state->error = CaptureDialog::tr("Timed out waiting for the target's capture connection.");
+      break;
+    }
+    for(const ManualLaunch::Process &process : current.processes)
+    {
+      unsigned count = attempts.value(process.pid);
+      if(count >= 3 && !injected.contains(process.pid) &&
+         ManualLaunch::IsExactTarget(process, target))
+      {
+        state->error = CaptureDialog::tr("Failed to inject target PID %1 after 3 attempts.\n%2")
+                           .arg(process.pid).arg(lastError.value(process.pid));
+        break;
+      }
+      if(injected.contains(process.pid) || detectedAt < 0 || clock.elapsed() - detectedAt < 1000 ||
+         (count > 0 && clock.elapsed() - lastAttempt.value(process.pid) < 1000) ||
+         !ManualLaunch::CanInject(process, existing.processes.constData(), existing.processes.count(),
+                                  target, count, state->cancelled.loadAcquire() != 0))
+        continue;
+      // Socket probing may have taken time. Revalidate the exact path and process
+      // lifetime before passing a PID to the injector.
+      ManualLaunchProcesses latest;
+      bool sameTarget = false;
+      for(const ManualLaunch::Process &candidate : latest.processes)
+        if(candidate.pid == process.pid && candidate.started == process.started &&
+           ManualLaunch::IsExactTarget(candidate, target))
+          sameTarget = true;
+      if(!sameTarget || state->cancelled.loadAcquire())
+        continue;
+      attempts[process.pid] = ++count;
+      lastAttempt[process.pid] = clock.elapsed();
+      state->SetStatus(CaptureDialog::tr("Injecting target PID %1 (attempt %2 of 3)...")
+                           .arg(process.pid).arg(count));
+      ExecuteResult result = RECONDUCK_InjectIntoProcess(process.pid, settings.environment,
+                                                        capturefile, settings.options, false);
+      if(result.result.OK() && result.ident != 0)
+        injected.insert(process.pid);
+      else
+      {
+        lastError[process.pid] = result.result.OK()
+                                    ? CaptureDialog::tr("Injection returned no capture connection identifier.")
+                                    : QString(result.result.Message());
+        state->SetStatus(CaptureDialog::tr("Injection failed for PID %1 (attempt %2 of 3).\n%3")
+                             .arg(process.pid).arg(count).arg(lastError.value(process.pid)));
+      }
+    }
+    // Poll cancellation every 25ms, with process snapshots at most four times per second.
+    for(int i = 0; i < 10 && !state->cancelled.loadAcquire(); i++)
+      QThread::msleep(25);
+  }
+
+  // No pre-existing session is stopped, including on failed startup or cancellation.
+  if(ownsGlobalHook)
+  {
+    RECONDUCK_StopGlobalHook();
+    if(RECONDUCK_IsGlobalHookActive())
+    {
+      state->cleanupFailed = true;
+      state->error = CaptureDialog::tr("Global Hook cleanup failed. The hook is still active.");
+    }
+  }
+  state->done.storeRelease(1);
+}
+#endif
 
 static QString GetDescription(const EnvironmentModification &env)
 {
@@ -225,6 +486,8 @@ CaptureDialog::CaptureDialog(ICaptureContext &ctx, OnCaptureMethod captureCallba
 
 CaptureDialog::~CaptureDialog()
 {
+  if(m_ManualLaunch)
+    m_ManualLaunch->cancelled.storeRelease(1);
   m_Ctx.BuiltinWindowClosed(this);
 
   if(ui->toggleGlobal->isChecked())
@@ -268,6 +531,7 @@ void CaptureDialog::SetInjectMode(bool inject)
     ui->launch->setText(lit("Launch"));
     this->setWindowTitle(lit("Launch Application"));
   }
+  UpdateGlobalHook();
 }
 
 void CaptureDialog::on_CaptureCallstacks_toggled(bool checked)
@@ -638,6 +902,11 @@ void CaptureDialog::on_processRefesh_clicked()
 
 bool CaptureDialog::checkAllowClose()
 {
+  if(m_ManualLaunch)
+  {
+    m_ManualLaunch->cancelled.storeRelease(1);
+    return false;
+  }
   if(RECONDUCK_IsGlobalHookActive())
   {
     RDDialog::critical(this, tr("Global hook active"),
@@ -760,7 +1029,7 @@ void CaptureDialog::on_toggleGlobal_clicked()
 
   QList<QWidget *> enableDisableWidgets = {ui->exePath,       ui->exePathBrowse, ui->workDirPath,
                                            ui->workDirBrowse, ui->cmdline,       ui->launch,
-                                           ui->saveSettings,  ui->loadSettings};
+                                           ui->waitLaunch,    ui->saveSettings,  ui->loadSettings};
 
   for(QWidget *o : ui->optionsGroup->findChildren<QWidget *>(QString(), Qt::FindDirectChildrenOnly))
     if(o)
@@ -900,6 +1169,108 @@ void CaptureDialog::on_loadLastCapture_clicked()
 void CaptureDialog::on_launch_clicked()
 {
   Launch();
+}
+
+void CaptureDialog::on_waitLaunch_clicked()
+{
+  if(m_ManualLaunch)
+  {
+    m_ManualLaunch->cancelled.storeRelease(1);
+    ui->waitLaunch->setEnabled(false);
+    ui->manualLaunchStatus->setText(tr("Cancelling; waiting for the current operation to finish..."));
+    return;
+  }
+#if defined(Q_OS_WIN32)
+  if(IsInjectMode() || m_Ctx.Replay().CurrentRemote().IsValid() ||
+     !m_Ctx.Config().AllowGlobalHook || !RECONDUCK_CanGlobalHook())
+    return;
+  if(RECONDUCK_IsGlobalHookActive())
+  {
+    RDDialog::critical(this, tr("Global Hook already active"),
+                       tr("Disable the existing Global Hook session before waiting for launch."));
+    return;
+  }
+  QString exe = ui->exePath->text().trimmed();
+  if(!QFileInfo::exists(exe))
+    exe = QStandardPaths::findExecutable(exe);
+  if(exe.isEmpty() || !QFileInfo(exe).isFile())
+  {
+    RDDialog::critical(this, tr("Invalid executable"),
+                       tr("Select the actual rendering executable before waiting for launch."));
+    return;
+  }
+  if(!IsRunningAsAdmin())
+  {
+    RDDialog::critical(this, tr("Administrator privileges required"),
+                       tr("Restart ReconDuck as administrator to wait for a manually launched application."));
+    return;
+  }
+  if(!m_Main->PromptCloseCapture())
+    return;
+
+  SaveSettings(mostRecentFilename());
+  PopulateMostRecent();
+  CaptureSettings settings = Settings();
+  QString capturefile = m_Ctx.TempCaptureFilename(QFileInfo(exe).baseName());
+  exe = NormaliseManualLaunchPath(exe);
+  rdcstr username = GetSystemUsername();
+  QSharedPointer<ManualLaunchState> state(new ManualLaunchState);
+  m_ManualLaunch = state;
+
+  QList<QPair<QWidget *, bool>> enabled;
+  const QList<QWidget *> controls = {ui->exeGroup, ui->optionsGroup, ui->actionGroup,
+                                     ui->launch, ui->saveSettings, ui->loadSettings,
+                                     ui->loadLastCapture, ui->toggleGlobal};
+  for(QWidget *widget : controls)
+  {
+    enabled.push_back(qMakePair(widget, widget->isEnabled()));
+    widget->setEnabled(false);
+  }
+  ui->waitLaunch->setText(tr("Cancel Waiting"));
+  ui->manualLaunchStatus->setText(tr("Preparing manual launch capture..."));
+
+  LambdaThread *worker = new LambdaThread([state, exe, capturefile, settings, username]() {
+    RunManualLaunch(state, exe, capturefile, settings, username);
+  });
+  worker->setName(lit("WaitForManualLaunch"));
+  worker->selfDelete(true);
+
+  QTimer *timer = new QTimer(this);
+  connect(timer, &QTimer::timeout, this, [this, state, settings, enabled, timer]() {
+    if(!state->cancelled.loadAcquire())
+    {
+      QMutexLocker lock(&state->mutex);
+      ui->manualLaunchStatus->setText(state->status);
+    }
+    if(!state->done.loadAcquire())
+      return;
+    timer->stop();
+    timer->deleteLater();
+    for(const QPair<QWidget *, bool> &widget : enabled)
+      widget.first->setEnabled(widget.second);
+    ui->waitLaunch->setText(tr("Wait for Launch"));
+    m_ManualLaunch.clear();
+    UpdateGlobalHook();
+    bool cancelled = state->cancelled.loadAcquire() != 0;
+    ui->manualLaunchStatus->setText(cancelled ? tr("Waiting cancelled.") : QString());
+    if(cancelled && !state->cleanupFailed)
+      return;
+    if(!state->error.isEmpty())
+    {
+      RDDialog::critical(this, tr("Manual launch capture failed"), state->error);
+      return;
+    }
+    if(state->ident != 0)
+    {
+      LiveCapture *live = new LiveCapture(m_Ctx, QString(), QString(), state->ident, m_Main, m_Main);
+      m_Main->ShowLiveCapture(live);
+      if(settings.numQueuedFrames > 0)
+        live->QueueCapture(settings.queuedFrameCap, settings.numQueuedFrames);
+    }
+  });
+  timer->start(100);
+  worker->start();
+#endif
 }
 
 void CaptureDialog::on_processList_activated(const QModelIndex &index)
@@ -1124,6 +1495,21 @@ void CaptureDialog::UpdateGlobalHook()
   ui->globalGroup->setVisible(!IsInjectMode() && m_Ctx.Config().AllowGlobalHook &&
                               RECONDUCK_CanGlobalHook());
 
+#if defined(Q_OS_WIN32)
+  bool canWait = !IsInjectMode() && !m_Ctx.Replay().CurrentRemote().IsValid() &&
+                 m_Ctx.Config().AllowGlobalHook && RECONDUCK_CanGlobalHook();
+#else
+  bool canWait = false;
+#endif
+  ui->waitLaunch->setVisible(canWait);
+  if(m_ManualLaunch)
+  {
+    ui->toggleGlobal->setEnabled(false);
+    return;
+  }
+  ui->waitLaunch->setEnabled(canWait && !ui->exePath->text().trimmed().isEmpty() &&
+                              !RECONDUCK_IsGlobalHookActive());
+
   if(ui->exePath->text().length() >= 4)
   {
     ui->toggleGlobal->setEnabled(true);
@@ -1148,6 +1534,8 @@ void CaptureDialog::UpdateRemoteHost()
     ui->cmdLineLabel->setText(tr("Intent Arguments"));
   else
     ui->cmdLineLabel->setText(tr("Command-line Arguments"));
+
+  UpdateGlobalHook();
 }
 
 void CaptureDialog::SetEnvironmentModifications(const rdcarray<EnvironmentModification> &modifications)
@@ -1169,6 +1557,8 @@ void CaptureDialog::SetEnvironmentModifications(const rdcarray<EnvironmentModifi
 
 ICaptureConnection *CaptureDialog::Launch()
 {
+  if(m_ManualLaunch)
+    return NULL;
   ICaptureConnection *ret = NULL;
   if(IsInjectMode())
   {

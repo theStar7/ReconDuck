@@ -36,12 +36,34 @@
 #include "hooks/hooks.h"
 #include "os/os_specific.h"
 #include "strings/string_utils.h"
+#include "win32_export_detour.h"
 
 #define VERBOSE_DEBUG_HOOK OPTION_OFF
 
 // map from address of IAT entry, to original contents
 std::map<void **, void *> s_InstalledHooks;
 Threading::CriticalSection installedLock;
+
+static ExportDetour::Registry exportDetours;
+static Threading::CriticalSection exportDetourLock;
+
+static void ResolveOriginal(HMODULE module, FunctionHook &hook, bool replace = false)
+{
+  SCOPED_LOCK(exportDetourLock);
+  if(hook.orig && !exportDetours.IsAttached(hook.orig) && (replace || *hook.orig == NULL))
+    *hook.orig = GetProcAddress(module, hook.function.c_str());
+}
+
+static void ApplyExportDetour(const char *library, HMODULE module, FunctionHook &hook)
+{
+  if(!hook.orig || !hook.hook)
+    return;
+  SCOPED_LOCK(exportDetourLock);
+  DWORD result = exportDetours.Attach(library, module, hook.function.c_str(), hook.orig, hook.hook);
+  if(result != NO_ERROR && result != ERROR_NOT_SUPPORTED && result != ERROR_PROC_NOT_FOUND)
+    RDCWARN("Failed to detour %s!%s: 0x%08x; retaining import hooks", library,
+            hook.function.c_str(), result);
+}
 
 bool ApplyHook(FunctionHook &hook, void **IATentry, bool &already)
 {
@@ -191,6 +213,10 @@ struct CachedHookData
        strstr(lowername, STRINGIZE(RDOC_BASE_NAME) ".dll") == lowername)
       return;
 
+    // These modules issue private driver NVAPI queries, which must stay native.
+    if(!strcmp(lowername, "nvcamera32.dll") || !strcmp(lowername, "nvcamera64.dll"))
+      return;
+
     // set module pointer if we are hooking exports from this module
     for(auto it = DllHooks.begin(); it != DllHooks.end(); ++it)
     {
@@ -207,11 +233,12 @@ struct CachedHookData
           // out through FunctionHook::ApplyHook)
           for(FunctionHook &hook : it->second.FunctionHooks)
           {
-            if(hook.orig && *hook.orig == NULL)
-              *hook.orig = GetProcAddress(module, hook.function.c_str());
+            ResolveOriginal(module, hook);
           }
 
           it->second.FetchOrdinalNames();
+          for(FunctionHook &hook : it->second.FunctionHooks)
+            ApplyExportDetour(it->first.c_str(), module, hook);
         }
         else if(it->second.module != module)
         {
@@ -254,11 +281,12 @@ struct CachedHookData
             // we also need to re-initialise the hooks as the orig pointers are now stale
             for(FunctionHook &hook : it->second.FunctionHooks)
             {
-              if(hook.orig)
-                *hook.orig = GetProcAddress(module, hook.function.c_str());
+              ResolveOriginal(module, hook, true);
             }
 
             it->second.module = module;
+            for(FunctionHook &hook : it->second.FunctionHooks)
+              ApplyExportDetour(it->first.c_str(), module, hook);
           }
         }
       }
@@ -334,7 +362,15 @@ struct CachedHookData
     PIMAGE_OPTIONAL_HEADER optHeader =
         (PIMAGE_OPTIONAL_HEADER)((BYTE *)fileHeader + sizeof(IMAGE_FILE_HEADER));
 
-    DWORD iatOffset = optHeader->DataDirectory[IMAGE_DIRECTORY_ENTRY_IMPORT].VirtualAddress;
+    const IMAGE_DATA_DIRECTORY &imports = optHeader->DataDirectory[IMAGE_DIRECTORY_ENTRY_IMPORT];
+    DWORD iatOffset = imports.VirtualAddress;
+    if(iatOffset == 0 || imports.Size < sizeof(IMAGE_IMPORT_DESCRIPTOR) ||
+       iatOffset >= optHeader->SizeOfImage || imports.Size > optHeader->SizeOfImage - iatOffset)
+    {
+      FreeLibrary(refcountModHandle);
+      return;
+    }
+    const size_t descriptorCount = imports.Size / sizeof(IMAGE_IMPORT_DESCRIPTOR);
 
     IMAGE_IMPORT_DESCRIPTOR *importDesc = (IMAGE_IMPORT_DESCRIPTOR *)(baseAddress + iatOffset);
 
@@ -342,7 +378,7 @@ struct CachedHookData
     RDCDEBUG("=== import descriptors:");
 #endif
 
-    while(iatOffset && importDesc->FirstThunk)
+    for(size_t descriptor = 0; descriptor < descriptorCount && importDesc->FirstThunk; ++descriptor)
     {
       const char *dllName = (const char *)(baseAddress + importDesc->Name);
 
@@ -610,9 +646,10 @@ static void HookAllModules()
       // late-loaded)
       for(FunctionHook &hook : it->second.FunctionHooks)
       {
-        if(hook.orig && *hook.orig == NULL)
-          *hook.orig = GetProcAddress(it->second.module, hook.function.c_str());
+        ResolveOriginal(it->second.module, hook);
       }
+      for(FunctionHook &hook : it->second.FunctionHooks)
+        ApplyExportDetour(it->first.c_str(), it->second.module, hook);
     }
 
     rdcarray<FunctionLoadCallback> callbacks;
@@ -786,11 +823,12 @@ FARPROC WINAPI Hooked_GetProcAddress(HMODULE mod, const LPCSTR func)
         // out through FunctionHook::ApplyHook)
         for(FunctionHook &hook : it->second.FunctionHooks)
         {
-          if(hook.orig && *hook.orig == NULL)
-            *hook.orig = GetProcAddress(it->second.module, hook.function.c_str());
+          ResolveOriginal(it->second.module, hook);
         }
 
         it->second.FetchOrdinalNames();
+        for(FunctionHook &hook : it->second.FunctionHooks)
+          ApplyExportDetour(it->first.c_str(), it->second.module, hook);
       }
     }
 
@@ -882,19 +920,9 @@ static void InitHookData()
     s_HookData = new CachedHookData;
 
     RDCASSERT(s_HookData->DllHooks.empty());
-    s_HookData->DllHooks["kernel32.dll"].FunctionHooks.push_back(
-        FunctionHook("LoadLibraryA", NULL, &Hooked_LoadLibraryA));
-    s_HookData->DllHooks["kernel32.dll"].FunctionHooks.push_back(
-        FunctionHook("LoadLibraryW", NULL, &Hooked_LoadLibraryW));
-    s_HookData->DllHooks["kernel32.dll"].FunctionHooks.push_back(
-        FunctionHook("LoadLibraryExA", NULL, &Hooked_LoadLibraryExA));
-    s_HookData->DllHooks["kernel32.dll"].FunctionHooks.push_back(
-        FunctionHook("LoadLibraryExW", NULL, &Hooked_LoadLibraryExW));
-    s_HookData->DllHooks["kernel32.dll"].FunctionHooks.push_back(
-        FunctionHook("GetProcAddress", NULL, &Hooked_GetProcAddress));
-
     for(const char *apiset :
-        {"api-ms-win-core-libraryloader-l1-1-0.dll", "api-ms-win-core-libraryloader-l1-1-1.dll",
+        {"kernel32.dll", "kernelbase.dll", "api-ms-win-core-libraryloader-l1-1-0.dll",
+         "api-ms-win-core-libraryloader-l1-1-1.dll",
          "api-ms-win-core-libraryloader-l1-1-2.dll", "api-ms-win-core-libraryloader-l1-2-0.dll",
          "api-ms-win-core-libraryloader-l1-2-1.dll"})
     {
@@ -918,7 +946,7 @@ static void InitHookData()
 
 void LibraryHooks::RegisterFunctionHook(const char *libraryName, const FunctionHook &hook)
 {
-  if(!_stricmp(libraryName, "kernel32.dll"))
+  if(!_stricmp(libraryName, "kernel32.dll") || !_stricmp(libraryName, "kernelbase.dll"))
   {
     if(hook.function == "LoadLibraryA" || hook.function == "LoadLibraryW" ||
        hook.function == "LoadLibraryExA" || hook.function == "LoadLibraryExW" ||
@@ -991,6 +1019,13 @@ void LibraryHooks::RemoveHooks()
 {
   LibraryHooks::RemoveHookCallbacks();
 
+  {
+    SCOPED_LOCK(exportDetourLock);
+    DWORD result = exportDetours.RemoveAll();
+    if(result != NO_ERROR)
+      RDCERR("Failed to remove export hooks: 0x%08x; preserving attached state", result);
+  }
+
   for(auto it = s_InstalledHooks.begin(); it != s_InstalledHooks.end(); ++it)
   {
     DWORD oldProtection = PAGE_EXECUTE;
@@ -1048,9 +1083,11 @@ void Win32_ManualHookModule(rdcstr modName, HMODULE module)
 
   for(FunctionHook &hook : s_HookData->DllHooks[modName].FunctionHooks)
   {
-    if(hook.orig)
-      *hook.orig = GetProcAddress(module, hook.function.c_str());
+    ResolveOriginal(module, hook, true);
   }
+
+  for(FunctionHook &hook : s_HookData->DllHooks[modName].FunctionHooks)
+    ApplyExportDetour(modName.c_str(), module, hook);
 
   s_HookData->ApplyHooks(modName.c_str(), module);
 }

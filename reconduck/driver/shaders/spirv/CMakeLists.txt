@@ -154,4 +154,9 @@ endif()
 
 add_library(rdoc_spirv OBJECT ${sources})
 target_compile_definitions(rdoc_spirv ${RDOC_DEFINITIONS})
+
+if(MSVC)
+    # Captured applications may have already loaded a runtime older than VS 2022 17.10.
+    target_compile_definitions(rdoc_spirv PRIVATE _DISABLE_CONSTEXPR_MUTEX_CONSTRUCTOR)
+endif()
 target_include_directories(rdoc_spirv ${RDOC_INCLUDES} ${glslang_dir})

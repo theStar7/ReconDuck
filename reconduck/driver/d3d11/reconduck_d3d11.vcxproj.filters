@@ -192,4 +192,7 @@
       <Filter>Hooks</Filter>
     </ClInclude>
   </ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="d3d11_device_diagnostics.h"><Filter>Util</Filter></ClInclude>
+  </ItemGroup>
 </Project>

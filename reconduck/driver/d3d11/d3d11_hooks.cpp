@@ -27,6 +27,7 @@
 #include "driver/dxgi/dxgi_wrapped.h"
 #include "hooks/hooks.h"
 #include "d3d11_device.h"
+#include "d3d11_device_diagnostics.h"
 
 ID3DDevice *GetD3D11DeviceIfAlloc(IUnknown *dev)
 {
@@ -136,33 +137,22 @@ private:
 
     RDCDEBUG("Calling real createdevice...");
 
-    // Hack for D3DGear which crashes if ppDevice is NULL
+    // Retain a device for context/swapchain-only calls (also avoids D3DGear's NULL-device crash).
+    // A validation-only call must keep its NULL outputs and original S_FALSE result.
     ID3D11Device *dummydev = NULL;
-    bool dummyUsed = false;
-    if(ppDevice == NULL)
+    if(ppDevice == NULL && (ppImmediateContext || ppSwapChain))
     {
       ppDevice = &dummydev;
-      dummyUsed = true;
     }
 
     HRESULT ret = real(pAdapter, DriverType, Software, Flags, pFeatureLevels, FeatureLevels,
-                       SDKVersion, pUsedSwapDesc, ppSwapChain, ppDevice, pFeatureLevel, NULL);
-
-    SAFE_RELEASE(dummydev);
-    if(dummyUsed)
-      ppDevice = NULL;
+                       SDKVersion, pUsedSwapDesc, ppSwapChain, ppDevice, pFeatureLevel,
+                       ppImmediateContext);
 
     RDCDEBUG("Called real createdevice...");
 
-    bool suppress = false;
-
-    suppress = (Flags & D3D11_CREATE_DEVICE_PREVENT_ALTERING_LAYER_SETTINGS_FROM_REGISTRY) != 0;
-
-    if(suppress)
-    {
-      RDCLOG("Application requested not to be hooked.");
-    }
-    else if(SUCCEEDED(ret) && ppDevice)
+    // The registry-layer flag controls runtime layers, not explicit capture interception.
+    if(SUCCEEDED(ret) && ppDevice && *ppDevice)
     {
       RDCDEBUG("succeeded and hooking.");
 
@@ -182,11 +172,15 @@ private:
 
         *ppDevice = wrap;
 
-        wrap->GetImmediateContext(ppImmediateContext);
-
         if(ppSwapChain && *ppSwapChain)
           *ppSwapChain = new WrappedIDXGISwapChain4(
               *ppSwapChain, pSwapChainDesc ? pSwapChainDesc->OutputWindow : NULL, wrap);
+      }
+
+      if(ppImmediateContext)
+      {
+        SAFE_RELEASE(*ppImmediateContext);
+        (*ppDevice)->GetImmediateContext(ppImmediateContext);
       }
     }
     else if(SUCCEEDED(ret))
@@ -195,8 +189,10 @@ private:
     }
     else
     {
-      RDCDEBUG("failed. HRESULT: %s", ToStr(ret).c_str());
+      LogD3D11Failure(NULL, "CreateDevice", ret);
     }
+
+    SAFE_RELEASE(dummydev);
 
     EndRecurse();
 
