@@ -8,17 +8,17 @@ pushd "${REPO_ROOT}"
 echo Using ${PYTHON_ROOT} and ${QT_ROOT} for build
 
 # Build 32-bit Release
-MSYS2_ARG_CONV_EXCL="*" msbuild.exe /p:VSPythonOverridePath="$(native_path "${PYTHON_ROOT}")" /p:QtOverridePath="$(native_path "${QT_ROOT}")" /nologo /m /fl4 /flp4':Verbosity=minimal;Encoding=ASCII;logfile=dist/build32.log' renderdoc.sln /t:Rebuild /p:'Configuration=Release;Platform=x86'
+MSYS2_ARG_CONV_EXCL="*" msbuild.exe /p:VSPythonOverridePath="$(native_path "${PYTHON_ROOT}")" /p:QtOverridePath="$(native_path "${QT_ROOT}")" /nologo /m /fl4 /flp4':Verbosity=minimal;Encoding=ASCII;logfile=dist/build32.log' reconduck.sln /t:Rebuild /p:'Configuration=Release;Platform=x86'
 
-if [ ! -f ./Win32/Release/renderdoc.dll ] || [ ! -f ./Win32/Release/qrenderdoc.exe ] || [ ! -f ./Win32/Release/renderdoccmd.exe ] ; then
+if [ ! -f ./Win32/Release/reconduck.dll ] || [ ! -f ./Win32/Release/qreconduck.exe ] || [ ! -f ./Win32/Release/reconduckcmd.exe ] ; then
 	echo "Failed to build 32-bit release mode.";
 	exit 1;
 fi
 
 # Build 64-bit Release
-MSYS2_ARG_CONV_EXCL="*" msbuild.exe /p:VSPythonOverridePath="$(native_path "${PYTHON_ROOT}")" /p:QtOverridePath="$(native_path "${QT_ROOT}")" /nologo /m /fl4 /flp4':Verbosity=minimal;Encoding=ASCII;logfile=dist/build64.log' renderdoc.sln /t:Rebuild /p:'Configuration=Release;Platform=x64'
+MSYS2_ARG_CONV_EXCL="*" msbuild.exe /p:VSPythonOverridePath="$(native_path "${PYTHON_ROOT}")" /p:QtOverridePath="$(native_path "${QT_ROOT}")" /nologo /m /fl4 /flp4':Verbosity=minimal;Encoding=ASCII;logfile=dist/build64.log' reconduck.sln /t:Rebuild /p:'Configuration=Release;Platform=x64'
 
-if [ ! -f ./x64/Release/renderdoc.dll ] || [ ! -f ./x64/Release/qrenderdoc.exe ] || [ ! -f ./x64/Release/renderdoccmd.exe ] ; then
+if [ ! -f ./x64/Release/reconduck.dll ] || [ ! -f ./x64/Release/qreconduck.exe ] || [ ! -f ./x64/Release/reconduckcmd.exe ] ; then
 	echo "Failed to build 64-bit release mode.";
 	exit 1;
 fi
@@ -31,7 +31,7 @@ pushd docs
 popd; # docs
 
 # if we didn't produce a chm file, bail out even if sphinx didn't return an error code above
-if [ ! -f ./Documentation/htmlhelp/renderdoc.chm ]; then
+if [ ! -f ./Documentation/htmlhelp/reconduck.chm ]; then
 	echo "Didn't auto-build chm file. Missing HTML Help Workshop?"
 
 	if [[ "$STRICT" == "yes" ]]; then

@@ -1,0 +1,4 @@
+[Thumbnailer Entry]
+TryExec=/usr/bin/reconduckcmd
+Exec=/usr/bin/reconduckcmd thumb -f png -s %s -o %o %i
+MimeType=application/x-reconduck-capture;

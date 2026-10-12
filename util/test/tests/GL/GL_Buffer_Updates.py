@@ -1,5 +1,5 @@
 import rdtest
-import renderdoc as rd
+import reconduck as rd
 
 
 class GL_Buffer_Updates(rdtest.TestCase):

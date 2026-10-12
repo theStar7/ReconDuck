@@ -5,10 +5,10 @@ import sys
 script_dir = os.path.realpath(os.path.dirname(__file__))
 
 parser = argparse.ArgumentParser()
-parser.add_argument('-r', '--renderdoc',
-                    help="The location of the renderdoc library to use", type=str)
-parser.add_argument('-p', '--pyrenderdoc',
-                    help="The location of the renderdoc python module to use", type=str)
+parser.add_argument('-r', '--reconduck',
+                    help="The location of the reconduck library to use", type=str)
+parser.add_argument('-p', '--pyreconduck',
+                    help="The location of the reconduck python module to use", type=str)
 parser.add_argument('-l', '--list',
                     help="Lists the tests available to run", action="store_true")
 parser.add_argument('-t', '--test_include', default=".*",
@@ -45,40 +45,40 @@ parser.add_argument('--internal_remote_server', help=argparse.SUPPRESS, action="
 parser.add_argument('--internal_thread', help=argparse.SUPPRESS, type=int, default=0, required=False)
 args = parser.parse_args()
 
-custom_pyrenderdoc = None
+custom_pyreconduck = None
 
-if args.pyrenderdoc is not None:
-    if os.path.isfile(args.pyrenderdoc):
-        custom_pyrenderdoc = os.path.abspath(os.path.dirname(args.pyrenderdoc))
-    elif os.path.isdir(args.pyrenderdoc):
-        custom_pyrenderdoc = os.path.abspath(args.pyrenderdoc)
+if args.pyreconduck is not None:
+    if os.path.isfile(args.pyreconduck):
+        custom_pyreconduck = os.path.abspath(os.path.dirname(args.pyreconduck))
+    elif os.path.isdir(args.pyreconduck):
+        custom_pyreconduck = os.path.abspath(args.pyreconduck)
     else:
-        raise RuntimeError(f"'{args.pyrenderdoc}' is not a valid path to the pyrenderdoc module")
+        raise RuntimeError(f"'{args.pyreconduck}' is not a valid path to the pyreconduck module")
 
-if args.renderdoc is not None:
-    if os.path.isfile(args.renderdoc):
-        renderdoc_dirpath = os.path.abspath(os.path.dirname(args.renderdoc))
-    elif os.path.isdir(args.renderdoc):
-        renderdoc_dirpath = os.path.abspath(args.renderdoc)
+if args.reconduck is not None:
+    if os.path.isfile(args.reconduck):
+        reconduck_dirpath = os.path.abspath(os.path.dirname(args.reconduck))
+    elif os.path.isdir(args.reconduck):
+        reconduck_dirpath = os.path.abspath(args.reconduck)
     else:
-        raise RuntimeError(f"'{args.renderdoc}' is not a valid path to the renderdoc library")
-    os.environ["PATH"] += os.pathsep + renderdoc_dirpath
+        raise RuntimeError(f"'{args.reconduck}' is not a valid path to the reconduck library")
+    os.environ["PATH"] += os.pathsep + reconduck_dirpath
     # Python 3.8 doesn't search PATH so add it to the DLL search path
     if sys.platform == 'win32' and sys.version_info[1] >= 8:
-        os.add_dll_directory(renderdoc_dirpath)
+        os.add_dll_directory(reconduck_dirpath)
 
-    # if the user didn't specify a pyrenderdoc but we do have a renderdoc, try the default location as a backup
-    if custom_pyrenderdoc is None:
+    # if the user didn't specify a pyreconduck but we do have a reconduck, try the default location as a backup
+    if custom_pyreconduck is None:
         if sys.platform == 'win32':
-            custom_pyrenderdoc = os.path.join(os.path.abspath(args.renderdoc), "pymodules")
+            custom_pyreconduck = os.path.join(os.path.abspath(args.reconduck), "pymodules")
         else:
-            custom_pyrenderdoc = os.path.abspath(args.renderdoc)
+            custom_pyreconduck = os.path.abspath(args.reconduck)
 
-# on windows if we still didn't get a custom_pyrenderdoc and importing fails,
+# on windows if we still didn't get a custom_pyreconduck and importing fails,
 # try to just pull in the default build location. Favour development over release
-if sys.platform == "win32" and custom_pyrenderdoc is None:
+if sys.platform == "win32" and custom_pyreconduck is None:
     try:
-        import renderdoc as _
+        import reconduck as _
     except ImportError:
         root = os.path.dirname(os.path.dirname(script_dir))
         import struct
@@ -91,19 +91,19 @@ if sys.platform == "win32" and custom_pyrenderdoc is None:
         rls = os.path.join(root, base, "Release", "pymodules")
 
         if os.path.isdir(dev):
-            custom_pyrenderdoc = dev
+            custom_pyreconduck = dev
         elif os.path.isdir(rls):
-            custom_pyrenderdoc = rls
+            custom_pyreconduck = rls
 
-        if sys.platform == 'win32' and sys.version_info[1] >= 8 and custom_pyrenderdoc is not None:
-            os.add_dll_directory(os.path.dirname(custom_pyrenderdoc))
+        if sys.platform == 'win32' and sys.version_info[1] >= 8 and custom_pyreconduck is not None:
+            os.add_dll_directory(os.path.dirname(custom_pyreconduck))
 
-if custom_pyrenderdoc is not None:
+if custom_pyreconduck is not None:
     # explicit paths go at the start, implicit paths go at the end
-    if args.pyrenderdoc is not None:
-        sys.path.insert(0, custom_pyrenderdoc)
+    if args.pyreconduck is not None:
+        sys.path.insert(0, custom_pyreconduck)
     else:
-        sys.path.append(custom_pyrenderdoc)
+        sys.path.append(custom_pyreconduck)
 
 sys.path.insert(0, os.path.realpath(os.path.dirname(__file__)))
 
@@ -132,8 +132,8 @@ except (ModuleNotFoundError, ImportError) as ex:
     with open(os.path.join(artifacts_dir, 'output.log.html'), "w") as f:
         f.write(f"<body><h1>Failed to import rdtest: {ex}</h1></body>")
 
-    print("Couldn't import renderdoc module. Try specifying path to python module with --pyrenderdoc " +
-          "or the path to the native library with --renderdoc")
+    print("Couldn't import reconduck module. Try specifying path to python module with --pyreconduck " +
+          "or the path to the native library with --reconduck")
     print(ex)
 
     sys.exit(1)

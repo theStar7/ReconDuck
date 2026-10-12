@@ -5,9 +5,9 @@ set -x
 rm -rf /io/*
 
 cd /
-mkdir renderdoc_build
-cd renderdoc_build
-CC=clang CXX=clang++ CFLAGS="-fPIC -fvisibility=hidden" cmake -DCMAKE_BUILD_TYPE=RelWithDebInfo -DCMAKE_INSTALL_PREFIX=/io/dist/ -DVULKAN_LAYER_FOLDER=/io/dist/etc/vulkan/implicit_layer.d -DSTATIC_QRENDERDOC=ON -DQRENDERDOC_NO_CXX11_REGEX=ON /renderdoc
+mkdir reconduck_build
+cd reconduck_build
+CC=clang CXX=clang++ CFLAGS="-fPIC -fvisibility=hidden" cmake -DCMAKE_BUILD_TYPE=RelWithDebInfo -DCMAKE_INSTALL_PREFIX=/io/dist/ -DVULKAN_LAYER_FOLDER=/io/dist/etc/vulkan/implicit_layer.d -DSTATIC_QRECONDUCK=ON -DQRECONDUCK_NO_CXX11_REGEX=ON /reconduck
 make -j8
 make install
 
@@ -16,8 +16,8 @@ mkdir /io/pymodules
 cp -R lib/*.so /io/pymodules
 
 # Copy python lib folder, and trim
-mkdir -p /io/dist/share/renderdoc/pylibs/lib
-cd /io/dist/share/renderdoc/pylibs/lib
+mkdir -p /io/dist/share/reconduck/pylibs/lib
+cd /io/dist/share/reconduck/pylibs/lib
 cp -R /usr/lib/python3.8/ .
 cd python3.8
 # remove cache files

@@ -1,6 +1,6 @@
 import rdtest
 import struct
-import renderdoc as rd
+import reconduck as rd
 
 
 class VK_Shader_Editing(rdtest.TestCase):

@@ -1,15 +1,15 @@
 # these imports are not strictly necessary, but are convenient
-import renderdoc
-import qrenderdoc
+import reconduck
+import qreconduck
 
 # this is here to give autocomplete when editing the example
 # in VS Code where it doesn't know about this global
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    pyrenderdoc = qrenderdoc.CaptureContext()
+    pyreconduck = qreconduck.CaptureContext()
 
-mqt = pyrenderdoc.Extensions().GetMiniQtHelper()
+mqt = pyreconduck.Extensions().GetMiniQtHelper()
 
 # helper to make for shorter example code
 def add_widget(parent, child, text=""):
@@ -20,7 +20,7 @@ def add_widget(parent, child, text=""):
 
 # create a new floating window for our example
 top = mqt.CreateToplevelWidget("Example!")
-pyrenderdoc.AddDockWindow(top, qrenderdoc.DockReference.NewFloatingArea, None)
+pyreconduck.AddDockWindow(top, qreconduck.DockReference.NewFloatingArea, None)
 
 # add a group of interactive widgets
 group = add_widget(top, mqt.CreateGroupBox(True), "Interactive Widgets")

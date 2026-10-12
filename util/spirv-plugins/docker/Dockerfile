@@ -1,4 +1,4 @@
-FROM renderdoc-build
+FROM reconduck-build
 LABEL maintainer baldurk@baldurk.org
 COPY prepare.sh /
 RUN /prepare.sh

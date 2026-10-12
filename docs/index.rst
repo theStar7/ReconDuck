@@ -1,4 +1,4 @@
-RenderDoc
+ReconDuck
 =========
 
 .. include:: include/intro_header_inc.rst

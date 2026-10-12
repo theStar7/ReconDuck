@@ -1,6 +1,6 @@
 from typing import List
 
-import renderdoc as rd
+import reconduck as rd
 import rdtest
 
 

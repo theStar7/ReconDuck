@@ -1,33 +1,33 @@
 # these imports are not strictly necessary, but are convenient
-import renderdoc
-import qrenderdoc
+import reconduck
+import qreconduck
 
 # this is here to give autocomplete when editing the example
 # in VS Code where it doesn't know about this global
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    pyrenderdoc = qrenderdoc.CaptureContext()
+    pyreconduck = qreconduck.CaptureContext()
 
-if not pyrenderdoc.IsCaptureLoaded():
+if not pyreconduck.IsCaptureLoaded():
     raise RuntimeError("Run example with capture open")
 
-controller = pyrenderdoc.GetBlockingController()
+controller = pyreconduck.GetBlockingController()
 
 # grab the current action and pick an appropriate stage for it
-action = pyrenderdoc.CurAction()
+action = pyreconduck.CurAction()
 
 if action is None:
     raise RuntimeError("Run example with a draw action selected")
 
-if action.flags & renderdoc.ActionFlags.MeshDispatch:
-    stage = renderdoc.ShaderStage.Mesh
-elif action.flags & renderdoc.ActionFlags.Drawcall:
-    stage = renderdoc.ShaderStage.Vertex
+if action.flags & reconduck.ActionFlags.MeshDispatch:
+    stage = reconduck.ShaderStage.Mesh
+elif action.flags & reconduck.ActionFlags.Drawcall:
+    stage = reconduck.ShaderStage.Vertex
 else:
     raise RuntimeError("Run example with a geometry draw selected")
 
-pipe = pyrenderdoc.CurPipelineState()
+pipe = pyreconduck.CurPipelineState()
 refl = pipe.GetShaderReflection(stage)
 
 # find the push data, if there is some - not all APIs have this concept
@@ -71,7 +71,7 @@ for v in vars:
     print(f"{v.name} is {str(v.type)}")
 
     # for pointer variables, dive inside and see the data they're pointing to
-    if v.type == renderdoc.VarType.GPUPointer:
+    if v.type == reconduck.VarType.GPUPointer:
         ptr = v.GetPointer()
 
         if ptr.pointer == 0:
@@ -79,15 +79,15 @@ for v in vars:
         else:
             # we will need to interpret these by hand, so use the BufferInterpreter
             # helper
-            interp = qrenderdoc.BufferInterpreter
+            interp = qreconduck.BufferInterpreter
 
             # first look up which buffer this pointer is pointing to using the helper
             # which will enumerate through all known buffers and find the first match
             buf, offs = interp.LookupPointer(ptr.pointer)
-            name = pyrenderdoc.GetResourceName(buf)
+            name = pyreconduck.GetResourceName(buf)
             print(f"  Pointer to {name}+{offs}")
 
-            pointerConst = renderdoc.ShaderConstant()
+            pointerConst = reconduck.ShaderConstant()
 
             # get the type as declared by the shader - ptr will have a type ID that
             # indexes into the reflection structure containing a list of type

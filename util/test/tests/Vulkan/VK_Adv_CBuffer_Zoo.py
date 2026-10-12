@@ -1,5 +1,5 @@
 import rdtest
-import renderdoc as rd
+import reconduck as rd
 
 
 class VK_Adv_CBuffer_Zoo(rdtest.TestCase):

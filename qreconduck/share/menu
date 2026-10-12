@@ -1,0 +1,6 @@
+?package(local.reconduck):needs="x11" section="Applications/Programming" \
+	title="ReconDuck" \
+	command="qreconduck" \
+	icon="/usr/share/pixmaps/reconduck-icon-32x32.xpm" \
+	icon16x16="/usr/share/pixmaps/reconduck-icon-16x16.xpm" \
+	icon32x32="/usr/share/pixmaps/reconduck-icon-32x32.xpm"

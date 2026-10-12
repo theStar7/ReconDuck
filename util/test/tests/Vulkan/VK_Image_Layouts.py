@@ -1,5 +1,5 @@
 import rdtest
-import renderdoc as rd
+import reconduck as rd
 
 
 class VK_Image_Layouts(rdtest.TestCase):

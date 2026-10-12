@@ -1,4 +1,4 @@
-import renderdoc as rd
+import reconduck as rd
 import rdtest
 
 prevProgress = -1.0

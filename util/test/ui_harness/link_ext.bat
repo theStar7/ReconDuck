@@ -1,2 +1,2 @@
-mkdir %APPDATA%\qrenderdoc\extensions\renderdoc_test
-mklink /J %APPDATA%\qrenderdoc\extensions\renderdoc_test\ui_harness %~DP0
+mkdir %APPDATA%\qreconduck\extensions\reconduck_test
+mklink /J %APPDATA%\qreconduck\extensions\reconduck_test\ui_harness %~DP0

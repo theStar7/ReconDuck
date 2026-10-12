@@ -1,5 +1,5 @@
 import struct
-import renderdoc as rd
+import reconduck as rd
 import rdtest
 
 
